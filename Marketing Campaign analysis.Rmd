@@ -1,0 +1,556 @@
+---
+output:
+  pdf_document:
+    latex_engine: lualatex
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    fig_width: 7
+    fig_height: 6
+    fig_caption: true
+fontsize: 12pt
+geometry: margin=1in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, error = FALSE, warning = FALSE)
+```
+
+## Executive Summary
+
+The project aimed to understand the relationship between customer personality and various other factors such as demographics, purchasing habits, and personality traits. A [dataset](https://www.kaggle.com/datasets/imakash3011/customer-personality-analysis) containing information on customer personality was analyzed using a variety of statistical and machine learning techniques including ANOVA, Chi Squared, Correlation, Clustering, and Classification. The main objective of this study was to identify patterns, relationships, segment and classify customers in order to improve the targeting of marketing efforts, increase the effectiveness of marketing strategies and personalize the customer experience.
+
+ANOVA (Analysis of Variance) was used to determine if there is a relationship between a categorical variable and a continuous variable. Chi Squared was used to determine if there is a significant association between two categorical variables. Correlation was used to determine if there is a relationship between two continuous variables. Clustering, specifically K-means, was used to group similar objects together based on the characteristics or features of the data and generate segments of customers. The classification task was to classify new customers into segments generated from the K-Means segmentation using a prediction model, which was trained to predict a customer's segment based on their characteristics and features.
+
+## Checklist
+
+-   Hypothesis Testing
+
+-   ANOVA
+
+-   Chi Squared
+
+-   Correlation
+
+-   Clustering
+
+-   Prediction
+
+## Project Setup
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(corrplot)
+
+campaign_raw <- read_delim(
+  "data/marketing_campaign.csv",
+  delim = "\t",
+  escape_double = FALSE,
+  trim_ws = TRUE
+) %>% 
+  janitor::clean_names()
+
+
+wrapper_theme <- function(plot, caption = "Data: Kaggle") {
+  plot +
+    labs(caption = caption) +
+    theme_minimal() +
+    theme(
+      plot.title.position = "plot"
+    )
+}
+```
+
+## Exploratory Data Analysis
+
+-   Dataset has 2,240 rows and 29 columns
+-   Each record talks about a customer (i.e no duplicated record)
+-   Customers are withing the age of 25 - 75
+-   A lot of the customers are older age \>40.
+-   Close to 40% of customer are married and about 25% of customers are together.
+
+```{r}
+campaign_raw %>% 
+  glimpse()
+```
+
+```{r}
+sum(duplicated(campaign_raw$id))
+```
+
+```{r}
+age_plot <- campaign_raw %>% 
+  select(year_birth) %>% 
+  ggplot(aes(2022 - year_birth)) +
+  geom_density(fill = "#380ef5", alpha = 0.6) +
+  labs(
+    title = "Customer Age Distribution",
+    x = "Age",
+    y = NULL
+  ) +
+  theme(axis.text.y = element_blank())
+
+wrapper_theme(age_plot)
+```
+
+```{r}
+marital_status <-
+  campaign_raw %>% 
+  count(marital_status) %>% 
+  mutate(perc = n/sum(n)) %>% 
+  ggplot(aes(fct_reorder(marital_status, perc), perc)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() +
+  labs(
+    title = "Marital Status of Customers",
+    x = NULL, y = NULL
+  )
+
+wrapper_theme(marital_status)
+```
+
+```{r}
+
+cust_breakdown <-
+  campaign_raw %>% 
+  select(dt_customer, marital_status) %>% 
+  mutate(dt_customer = dmy(dt_customer)) %>% 
+  mutate(year_customer = year(dt_customer)) %>% 
+  add_count(marital_status) %>% 
+  filter(n > 100) %>%  
+  count(marital_status, year_customer) %>% 
+  group_by(year_customer) %>% 
+  mutate(perc = n/sum(n),
+         year_customer = factor(year_customer)) %>% 
+  ggplot(aes(year_customer, marital_status, fill = perc)) +
+  geom_tile(col = "white") +
+  geom_text(aes(label = glue::glue("{100*round(perc, 3)}%")),
+            size = 5) +
+  coord_flip() +
+  scale_fill_viridis_c(labels = scales::percent, limits = c(0, 0.5)) +
+  labs(
+    title = "Customer breakdown across years",
+    x = "Year of registration",
+    y = NULL,
+    fill = NULL
+  )
+
+wrapper_theme(cust_breakdown)
+```
+
+## Analysis 1: Hypothesis Testing
+
+-   Research Question: Older customers (50 and over 50 years) [**spends more**]{.underline} on products compared to younger customers (less that 50).
+
+-   Null Hypothesis: Older customers (50 and over 50 years) [**spends less**]{.underline} on products compared to younger customers (less that 50).
+
+-   Alternate Hypothesis: Older customers (50 and over 50 years) [**spends more**]{.underline} on products compared to younger customers (less that 50).
+
+-   Significance level: (0.05 or 5%)
+
+-   Analysis of the test: p-value
+
+-   Interpretation: The null hypothesis can be rejected because of the low p-value and thus confirming the alternative hypothesis that Older customers spends more on products compared to younger customers.
+
+```{r}
+age_class <- 
+  campaign_raw %>% 
+  select(id, year_birth) %>% 
+  mutate(age = 2022 - year_birth,
+         age = ifelse(age >= 50, "Old", "Young")) %>% 
+  select(-year_birth)
+
+total_amount <-
+  campaign_raw %>% 
+  select(id, starts_with("mnt_")) %>% 
+  pivot_longer(cols = starts_with("mnt_")) %>% 
+  count(id, wt = sum(value), name = "mnt_total")
+
+test_1_df <-
+  age_class %>% 
+  left_join(total_amount) %>% 
+  select(-id)
+
+## Older customers spends more on average
+wrapper_theme(test_1_df %>%
+                count(age, wt = mean(mnt_total)) %>%
+                ggplot(aes(age, n)) +
+                geom_col())
+
+## Total amount is non-parametric in nature
+## shapiro wilk's test shows a p value <2.2e-16
+shapiro.test(test_1_df$mnt_total)
+
+## We have to use a non paramteric t test
+wilcox.test(mnt_total ~ age, data = test_1_df, alternative = "greater")
+```
+
+## Analysis 2: ANOVA
+
+-   Hypothesis:
+
+-   Null: There [**aren't**]{.underline} differences in the mean amount spent on products across marital status.
+
+-   Alternative: There [**are**]{.underline} differences in the mean amount spent on products across marital status.
+
+-   Significance level: (0.05 or 5%)
+
+-   Analysis of the test: p-value
+
+-   Conclusion: The p-value of 0.9925 provides evidence of statistical significance, indicating that the mean amount spent on products does not differ across marital status.
+
+```{r}
+test_2 <-
+  campaign_raw %>% 
+  select(id, marital_status) %>% 
+  add_count(marital_status) %>% 
+  filter(n > 100) %>% 
+  select(-n) %>% 
+  left_join(total_amount)
+
+wrapper_theme(test_2 %>%
+                count(marital_status, wt = mean(mnt_total)) %>%
+                ggplot(aes(marital_status, n)) +
+                geom_col())
+
+kruskal.test(mnt_total ~ marital_status, data = test_2)
+```
+
+## Analysis 3: Chi square
+
+-   Hypothesis:
+
+-   Null: All four categories [**are**]{.underline} 100% independent.
+
+-   Alternative: All four categories [**are not**]{.underline} 100% independent.
+
+-   Significance level: (0.05 or 5%)
+
+-   Analysis of the test: p-value
+
+-   Conclusion: The results of the test of independence showed a p-value of 0.8967, indicating a high level of statistical significance for the null hypothesis. Therefore, the null hypothesis was adopted, which stated that there isn't any level of dependence between the four categories.
+
+-   Categories: Divorced, Married, Single, and Together.
+
+```{r}
+test_3 <-
+  campaign_raw %>% 
+  select(dt_customer, marital_status) %>% 
+  mutate(dt_customer = dmy(dt_customer)) %>% 
+  mutate(year_customer = year(dt_customer)) %>% 
+  add_count(marital_status) %>% 
+  filter(n > 100) %>% 
+  mutate(year_customer = factor(year_customer)) %>% 
+  select(year_customer, marital_status)
+
+test_3 %>%
+  count(year_customer, marital_status) %>%
+  group_by(year_customer) %>%
+  mutate(perc = n / sum(n) * 100)
+
+## Test
+chisq.test(table(test_3))
+```
+
+## Analysis 4: Correlation
+
+-   What variables are correlated with the total amount spend by a customer.
+
+-   Analysis of the test: pearson correlation coefficient
+
+-   Results:
+
+    -   Positively correlated: Number of catalog, store and web purchases and Income.
+
+    -   Negatively correlated: Kid income, Number of web visits per month.
+
+```{r}
+campaign_corr <-
+  campaign_raw %>%
+  mutate(age = 2022 - year_birth) %>%
+  select(where(is.numeric)) %>%
+  select(-starts_with("mnt_"), -starts_with("z_")) %>%
+  left_join(total_amount) %>%
+  select(-id, -year_birth) %>%
+  drop_na() %>%
+  cor()
+
+wrapper_theme(
+  campaign_corr %>%
+    as_tibble() %>%
+    mutate(cor_name = colnames(campaign_corr), .before = income) %>%
+    filter(cor_name == "mnt_total") %>%
+    pivot_longer(-cor_name) %>%
+    filter(name != "mnt_total") %>%
+    mutate(
+      col = ifelse(value < 0, "less", "greater"),
+      name = fct_reorder(name, value)
+    ) %>%
+    ggplot(aes(value, name)) +
+    geom_vline(xintercept = 0) +
+    geom_segment(aes(
+      yend = name, x = 0, xend = value
+    )) +
+    geom_point(aes(col = col), size = 13, show.legend = F) +
+    geom_text(aes(label = round(value, 2))) +
+    scale_color_manual(values = c(
+      "greater" = "blue", "less" = "red"
+    )) +
+    scale_x_continuous(limits = c(-1, 1)) +
+    labs(title = "Correlation with Total amount",
+         x = "Correlation Coefficient",
+         y = NULL)
+)
+```
+
+## Analysis 5: Clustering
+
+-   Research Question: Can customers be classified in to distinct market groups?
+
+-   Analysis of the test: Total within-cluster sum of squares.
+
+-   Test: Kmeans clustering
+
+-   Results: Customers were successfully clustered into three distinct group
+
+-   Major difference between these segments:
+
+    -   Segment 1 are high income earners and high spenders
+
+    -   Segment 2 are middle class earners.
+
+    -   Segment 3 are low earners.
+
+```{r}
+pca_df <-
+  recipe( ~ ., data = campaign_raw %>% drop_na()) %>%
+  update_role(id, new_role = "id") %>%
+  step_mutate(age = 2022 - year_birth) %>%
+  step_rm(year_birth,
+          dt_customer,
+          starts_with("accepted"),
+          starts_with("mnt_")) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(all_numeric_predictors()) %>%
+  prep() %>%
+  juice() 
+
+kclusts <-
+  tibble(k = 1:10) %>%
+  mutate(
+    kclust = map(k, ~ kmeans(select(pca_df, -id), .x)),
+    glanced = map(kclust, glance),
+  )
+
+kclusts %>%
+  unnest(cols = c(glanced)) %>%
+  ggplot(aes(k, tot.withinss)) +
+  geom_line(alpha = 0.5, size = 1.2, color = "black") +
+  geom_point(size = 2, color = "black")
+
+# #set.seed(78789)
+# final_clust <- kmeans(select(pca_df, -id), centers = 3)
+
+# final_clust %>% 
+#   write_rds("data/kmeans.rds")
+
+final_clust <- read_rds("data/kmeans.rds")
+
+wrapper_theme(augment(final_clust, pca_df) %>%
+                ggplot(aes(PC1, PC2, color = .cluster)) +
+                geom_point())
+
+```
+
+```{r}
+segment_df <-
+  campaign_raw %>%
+  drop_na() %>%
+  left_join(augment(final_clust, pca_df) %>%
+              select(id, segment = .cluster))
+```
+
+### Synthesis
+
+```{r}
+wrapper_theme(
+  segment_df %>%
+    select(id, segment, income) %>%
+    filter(income < 1e5) %>%
+    left_join(total_amount) %>%
+    ggplot(aes(income, mnt_total, col = segment)) +
+    geom_point() +
+    labs(title = "Amount against Income",
+         y = "Total amount spent",
+         x = "Income")
+)
+```
+
+```{r}
+wrapper_theme(segment_df %>% 
+  count(segment, wt = median(income)) %>% 
+  ggplot(aes(segment, n)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Customer's yearly household income by segments",
+       y = NULL,
+       x = "Segments"))
+```
+
+```{r}
+wrapper_theme(segment_df %>% 
+                left_join(total_amount) %>% 
+  count(segment, wt = median(mnt_total)) %>% 
+  ggplot(aes(segment, n)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Customer's total spend by segments",
+       y = NULL,
+       x = "Segments"))
+```
+
+```{r}
+wrapper_theme(
+  segment_df %>%
+    ggplot(aes(2022 - year_birth, fill = segment)) +
+    geom_density(alpha = 0.8) +
+    labs(title = "Customer Age Distribution by Segments",
+         x = "Age",
+         y = NULL) +
+    theme(axis.text.y = element_blank())
+)
+```
+
+```{r}
+wrapper_theme(segment_df %>% 
+  add_count(marital_status) %>% 
+  filter(n > 100) %>% 
+  count(segment, marital_status) %>% 
+  group_by(segment) %>% 
+  mutate(perc = n/sum(n)) %>% 
+  ungroup() %>% 
+  ggplot(aes(segment, perc, fill = marital_status)) +
+  geom_col( position = position_dodge()) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Marital Profile of Segments",
+       x = NULL, y = NULL, fill = "Marital Status"))
+```
+
+## Analysis 6: Typing Tool
+
+-   Research Question: Based on the segments, create a model to predict which segment a customer falls in.
+
+-   Significance of Test:
+
+    -   **F1 Score**: \>= 80%
+
+    -   **ROC-AUC**: \>= 80%
+
+-   **Analysis of the Test:** F1 score, ROC-AUC
+
+-   **Conclusion:**
+
+    -   The Random Forest was evaluated without any tuning or optimization.
+
+    -   It had an accuracy of 93.9%, ROC-AUC score of 99.4% and F1 score of 93.7%
+
+    -   Top ten variables that influenced the model in predicting segments were: Income, Number of Catalog, store, deals, and web purchases, Teen home, number of web visits, and Age.
+
+```{r}
+## Build models
+
+# create training and testing sets
+# create resampling folds from the training set
+
+set.seed(45332)
+segmentation_split <- initial_split(segment_df, strata = segment)
+segmentation_train <- training(segmentation_split)
+segmentation_test <- testing(segmentation_split)
+
+set.seed(533)
+segmentation_folds <- vfold_cv(segmentation_train, strata = segment)
+segmentation_folds
+```
+
+Create a model specification for each model
+
+```{r}
+ranger_spec <-
+  rand_forest(trees = 1001) %>%
+  set_engine("ranger", importance = "permutation") %>%
+  set_mode("classification")
+```
+
+Build a recipe: Data preprocessing before applying ML
+
+```{r}
+segmentation_recipe <-
+  recipe(segment ~ ., data = segment_df) %>%
+  update_role(id, new_role = "id") %>%
+  step_mutate(age = 2022 - year_birth) %>%
+  step_rm(year_birth,
+          dt_customer,
+          starts_with("accepted"),
+          starts_with("mnt_")) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_numeric_predictors()) %>%
+  step_normalize(all_numeric_predictors())
+  #step_pca(all_numeric_predictors()) 
+```
+
+Build a model workflow combining each model specification with a data preprocessor:
+
+```{r}
+ranger_wf <- workflow(segmentation_recipe, ranger_spec)
+```
+
+Evaluate models
+
+The model has no tuning parameters so it can be evaluated as it is.
+
+```{r}
+contrl_preds <- control_resamples(save_pred = TRUE)
+metrics <- metric_set(accuracy, roc_auc, f_meas)
+
+ranger_rs <- fit_resamples(
+  ranger_wf,
+  resamples = segmentation_folds,
+  control = contrl_preds,
+  metrics = metrics
+)
+
+```
+
+How good is the model?
+
+```{r}
+collect_metrics(ranger_rs)
+```
+
+Visualizing these results using confusion matrix
+
+```{r}
+collect_predictions(ranger_rs) %>% 
+  conf_mat(truth = segment, estimate = .pred_class)
+```
+
+Apply a final fit on the training data and evaluates on the testing data. This is the initial utilization of the testing data.
+
+```{r}
+final_fitted <- last_fit(ranger_wf, segmentation_split, metrics = metrics)
+collect_metrics(final_fitted)  ## metrics evaluated on the *testing* data
+```
+
+```{r}
+final_fitted %>% 
+  extract_fit_parsnip() %>% 
+  vip::vip() %>% 
+  wrapper_theme() +
+  labs(title = "Variable Importance")
+```
